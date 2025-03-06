@@ -1,0 +1,8 @@
+{
+  "forecast_days": 30,
+  "sequence_length": 60,
+  "chart_style": "dark",
+  "volume_overlay": true,
+  "nifty50_enabled": true,
+  "prediction_range_percent": 20
+}

@@ -1,0 +1,10 @@
+{
+    "close_price": "The closing price of the stock for the day.",
+    "prediction": "Predicted price in 30 days based on LSTM model.",
+    "ma50": "50-day Simple Moving Average.",
+    "volume": "Price volatility (standard deviation) over 30 days.",
+    "ma100": "100-day Simple Moving Average.",
+    "ma200": "200-day Simple Moving Average.",
+    "macd": "Moving Average Convergence Divergence, trend indicator.",
+    "bollinger": "Middle Bollinger Band, volatility indicator."
+  }
