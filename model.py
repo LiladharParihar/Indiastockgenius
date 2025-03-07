@@ -1,94 +1,241 @@
 import numpy as np
 import tensorflow as tf
+from tensorflow import keras
 from sklearn.preprocessing import MinMaxScaler
 from data import fetch_stock_data
+import logging
 
-def predict_lstm(prices, volumes=None, model=None, scaler=None, seq_length=60, forecast_days=30):
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def create_model(sequence_length, forecast_days=30):
+    """Create an LSTM model for time series prediction"""
+    model = tf.keras.Sequential([
+        tf.keras.layers.LSTM(100, return_sequences=True, input_shape=(sequence_length, 1)),
+        tf.keras.layers.Dropout(0.2),
+        tf.keras.layers.LSTM(50, return_sequences=False),
+        tf.keras.layers.Dropout(0.2),
+        tf.keras.layers.Dense(25, activation='relu'),
+        tf.keras.layers.Dense(1)  # Predict one step at a time
+    ])
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss='mse', metrics=['mae'])
+    return model
+
+def prepare_sequences(data, sequence_length, forecast_days):
     """
-    Predict future stock prices using an LSTM model with optional caching.
+    Prepare sequences for training
     
     Args:
-        prices (np.array): Historical closing prices.
-        volumes (np.array, optional): Historical volumes (ignored for now, added for compatibility).
-        model (tf.keras.Model, optional): Pre-trained model to reuse.
-        scaler (MinMaxScaler, optional): Pre-fitted scaler.
-        seq_length (int): Sequence length for LSTM input.
-        forecast_days (int): Number of days to predict.
+        data: Input data array of shape (n_samples, 1)
+        sequence_length: Number of time steps to use as input
+        forecast_days: Number of days to predict
     
     Returns:
-        dict or list: {'predictions': list, 'model': model, 'scaler': scaler} if training new model,
-                      or just predictions list if using cached model/scaler.
+        X: Input sequences of shape (n_samples, sequence_length, 1)
+        y: Target values of shape (n_samples, 1)
+    """
+    if len(data) < sequence_length + forecast_days:
+        raise ValueError(f"Not enough data points. Need at least {sequence_length + forecast_days}, got {len(data)}")
+    
+    X, y = [], []
+    for i in range(len(data) - sequence_length - forecast_days + 1):
+        X.append(data[i:(i + sequence_length)])
+        # For training, we only need the next immediate value
+        y.append(data[i + sequence_length])
+    
+    X = np.array(X)
+    y = np.array(y)
+    
+    if len(X) == 0 or len(y) == 0:
+        raise ValueError("Failed to create sequences")
+        
+    # Ensure correct shapes
+    X = X.reshape((X.shape[0], X.shape[1], 1))
+    y = y.reshape((y.shape[0], 1))
+    
+    return X, y
+
+def calculate_confidence(predictions, actual, scale_min, scale_max):
+    """
+    Calculate model confidence based on prediction error and data scale
+    
+    Args:
+        predictions: Model predictions
+        actual: Actual values
+        scale_min: Minimum value in original data
+        scale_max: Maximum value in original data
+    
+    Returns:
+        float: Confidence score between 0 and 1
+    """
+    if len(predictions) != len(actual):
+        raise ValueError("Predictions and actual values must have same length")
+        
+    mse = np.mean((predictions - actual) ** 2)
+    scale_range = max(1e-8, scale_max - scale_min)  # Avoid division by zero
+    normalized_mse = mse / (scale_range ** 2)
+    confidence = max(0.0, min(1.0, 1.0 - (normalized_mse * 10)))
+    return confidence
+
+def predict_lstm(data, forecast_days=30, sequence_length=60, model=None, scaler=None):
+    """
+    Predict stock prices using LSTM model
+    
+    Args:
+        data: numpy array of closing prices
+        forecast_days: number of days to forecast
+        sequence_length: number of previous days to use for prediction
+        model: pre-trained LSTM model (optional)
+        scaler: fitted MinMaxScaler (optional)
+    
+    Returns:
+        dict containing predictions, confidence score, and optionally the model and scaler
     """
     try:
-        if model is None or scaler is None:
-            # Train a new model if not provided
-            prices = np.array(prices, dtype=float)
-            if len(prices) < seq_length + 29:  # Need enough data for 30-day forecast
-                print("Not enough data for training LSTM")
-                return [np.nan] * forecast_days
-            model, scaler = train_lstm(prices, seq_length=seq_length)
-            if model is None or scaler is None:
-                return [np.nan] * forecast_days
+        # Input validation
+        data = np.asarray(data, dtype=np.float32)
+        if len(data.shape) == 1:
+            data = data.reshape(-1, 1)
+            
+        if len(data) < sequence_length + forecast_days:
+            raise ValueError(f"Not enough data points. Need at least {sequence_length + forecast_days}, got {len(data)}")
 
-        # Ensure prices is a numpy array and has enough data
-        prices = np.array(prices, dtype=float)
-        if len(prices) < seq_length:
-            print("Not enough data for prediction")
-            return [np.nan] * forecast_days
+        # Prepare data
+        if scaler is None:
+            scaler = MinMaxScaler(feature_range=(0, 1))
+            scaled_data = scaler.fit_transform(data)
+        else:
+            scaled_data = scaler.transform(data)
 
-        scaled_prices = scaler.transform(prices.reshape(-1, 1))
-        last_sequence = scaled_prices[-seq_length:]
-        if len(last_sequence) < seq_length:
-            return [np.nan] * forecast_days
+        # Prepare sequences for training
+        X, y = prepare_sequences(scaled_data, sequence_length, forecast_days)
+        
+        # Split data for training and validation
+        split = int(len(X) * 0.8)
+        X_train, X_val = X[:split], X[split:]
+        y_train, y_val = y[:split], y[split:]
 
-        # Multi-step prediction
+        # Create or use existing model
+        if model is None:
+            logger.info("Creating new LSTM model...")
+            model = create_model(sequence_length, forecast_days)
+            
+            # Train the model with early stopping
+            early_stopping = tf.keras.callbacks.EarlyStopping(
+                monitor='val_loss',
+                patience=10,
+                restore_best_weights=True
+            )
+            
+            logger.info("Training model...")
+            history = model.fit(
+                X_train, y_train,
+                epochs=100,
+                batch_size=32,
+                validation_data=(X_val, y_val),
+                callbacks=[early_stopping],
+                verbose=0
+            )
+            logger.info("Model training completed")
+
+        # Calculate confidence using validation set
+        val_predictions = model.predict(X_val, verbose=0)
+        confidence = calculate_confidence(
+            val_predictions.flatten(), 
+            y_val.flatten(),
+            np.min(data),
+            np.max(data)
+        )
+
+        # Generate predictions iteratively for the forecast period
         predictions = []
-        current_sequence = last_sequence.copy()
+        last_sequence = scaled_data[-sequence_length:].copy()
+        
         for _ in range(forecast_days):
-            input_data = np.array([current_sequence])
-            next_pred = model.predict(input_data, verbose=0)
-            next_price = scaler.inverse_transform(next_pred)[0][0]  # Take first day of 30-day output
-            predictions.append(next_price)
-            current_sequence = np.roll(current_sequence, -1)
-            current_sequence[-1] = scaler.transform([[next_price]])[0][0]
+            # Reshape sequence for prediction
+            current_sequence = last_sequence[-sequence_length:].reshape(1, sequence_length, 1)
+            # Predict next value
+            next_pred = model.predict(current_sequence, verbose=0)[0, 0]
+            predictions.append(next_pred)
+            # Update sequence with prediction
+            last_sequence = np.vstack([last_sequence, next_pred])
 
-        return {'predictions': predictions, 'model': model, 'scaler': scaler} if model is None else predictions
+        # Convert predictions back to original scale
+        predictions = np.array(predictions).reshape(-1, 1)
+        predictions = scaler.inverse_transform(predictions)
+
+        logger.info(f"Generated predictions for next {forecast_days} days with confidence: {confidence:.2%}")
+        
+        return {
+            'predictions': predictions.flatten(),
+            'confidence': confidence,
+            'model': model,
+            'scaler': scaler
+        }
+
     except Exception as e:
-        print(f"Error in predict_lstm: {e}")
-        return [np.nan] * forecast_days
+        logger.error(f"Error in predict_lstm: {str(e)}")
+        raise
 
-def train_lstm(data, seq_length=60, epochs=10):
+def train_lstm(data, forecast_days=30, sequence_length=60, epochs=100):
+    """
+    Train a new LSTM model
+    
+    Args:
+        data: Input time series data
+        forecast_days: Number of days to forecast
+        sequence_length: Number of previous days to use for prediction
+        epochs: Number of training epochs
+    
+    Returns:
+        tuple: (trained model, fitted scaler) or (None, None) if training fails
+    """
     try:
-        scaler = MinMaxScaler()
-        if len(data) < 2 or not isinstance(data, (np.ndarray, list)):
-            print("Not enough data or invalid data type for training LSTM")
-            return None, None
-        data = np.array(data, dtype=float)
-        scaled_data = scaler.fit_transform(data.reshape(-1, 1))
-
-        X, y = [], []
-        for i in range(len(data) - seq_length - 29):  # 30-day forecast
-            X.append(scaled_data[i:i + seq_length])
-            y.append(scaled_data[i + seq_length:i + seq_length + 30])  # 30 steps ahead
-        if len(X) < 2:
-            print("Not enough sequences for training LSTM")
-            return None, None
-
-        X, y = np.array(X), np.array(y)
+        # Input validation
+        data = np.asarray(data, dtype=np.float32)
+        if len(data.shape) == 1:
+            data = data.reshape(-1, 1)
+            
+        if len(data) < sequence_length + forecast_days:
+            raise ValueError(f"Not enough data points. Need at least {sequence_length + forecast_days}, got {len(data)}")
+        
+        # Prepare data
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        scaled_data = scaler.fit_transform(data)
+        
+        # Create sequences
+        X, y = prepare_sequences(scaled_data, sequence_length, forecast_days)
+        
+        # Split data
         train_size = int(len(X) * 0.8)
-        X_train, X_test = X[:train_size], X[train_size:]
-        y_train, y_test = y[:train_size], y[train_size:]
-
-        model = tf.keras.Sequential([
-            tf.keras.layers.LSTM(50, return_sequences=True, input_shape=(seq_length, 1)),
-            tf.keras.layers.LSTM(50),
-            tf.keras.layers.Dense(30)  # Output 30 days
-        ])
-        model.compile(optimizer='adam', loss='mse')
-        model.fit(X_train, y_train, epochs=epochs, batch_size=32, validation_data=(X_test, y_test), verbose=1)
+        X_train = X[:train_size]
+        y_train = y[:train_size]
+        X_val = X[train_size:]
+        y_val = y[train_size:]
+        
+        # Create and train model
+        logger.info("Creating and training new LSTM model...")
+        model = create_model(sequence_length, forecast_days)
+        early_stopping = tf.keras.callbacks.EarlyStopping(
+            monitor='val_loss',
+            patience=10,
+            restore_best_weights=True
+        )
+        
+        model.fit(
+            X_train, y_train,
+            epochs=epochs,
+            batch_size=32,
+            validation_data=(X_val, y_val),
+            callbacks=[early_stopping],
+            verbose=1
+        )
+        
+        logger.info("Model training completed successfully")
         return model, scaler
+        
     except Exception as e:
-        print(f"Error in train_lstm: {e}")
+        logger.error(f"Error in train_lstm: {str(e)}")
         return None, None
 
 def create_sequences(data, seq_length=60):
