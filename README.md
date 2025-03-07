@@ -2,7 +2,7 @@
 
 A powerful stock analysis and prediction application specifically designed for Indian stock market (NSE) with real-time data, LSTM-based predictions, and technical analysis.
 
-![IndiaStockGenius](screenshot.png) *(You can add a screenshot of your application here)*
+![IndiaStockGenius](screenshot.png) 
 
 ## Features
 
