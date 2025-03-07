@@ -25,7 +25,7 @@ def fetch_realtime_data(ticker):
 def fetch_news_sentiment(ticker):
     try:
         # Your NewsAPI key is already added here
-        NEWSAPI_KEY = "838becd793bd4d7dba2885b7957b6fca"  # Replace with your actual key
+        NEWSAPI_KEY = "YOUR_API_KEY"  # Replace with your actual key
         url = f"https://newsapi.org/v2/everything?q={ticker}&language=en&domains=economictimes.indiatimes.com,moneycontrol.com&apiKey={NEWSAPI_KEY}"
         response = requests.get(url)
         response.raise_for_status()
